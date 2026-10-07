@@ -157,3 +157,20 @@ func PutLegacyMessageForTest(contract uint32, topic string, payload []byte) erro
 	}
 	return PutLegacyIndexForTest(contract, topic)
 }
+
+// TxnStageTopicForTest is the hidden topic owner participant i of a batch
+// stages its message under.
+func TxnStageTopicForTest(batch string, i int) string {
+	return stageTopic(sysTxStage, batch, i)
+}
+
+// TxnReplicaStageTopicForTest is a replica participant's staging topic.
+func TxnReplicaStageTopicForTest(batch string, i int) string {
+	return stageTopic(sysTxReplicaStage, batch, i)
+}
+
+// TxnRegistryTopicForTest is the topic an owner participant's batch records
+// are kept under.
+func TxnRegistryTopicForTest(batch string) string {
+	return registryTopic(sysTxRegistry, batch)
+}

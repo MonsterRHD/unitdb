@@ -325,3 +325,52 @@ func (p *peerRPC) Revocations(req *RevocationsReq, resp *RevocationsResp) error 
 	}
 	return p.c.Revocations(req, resp)
 }
+
+func (p *peerRPC) TxnPrepare(req *TxnPrepareReq, resp *TxnPrepareResp) error {
+	if err := p.is(req.Node); err != nil {
+		return err
+	}
+	return p.c.TxnPrepare(req, resp)
+}
+
+func (p *peerRPC) TxnCommit(req *TxnCommitReq, resp *TxnCommitResp) error {
+	if err := p.is(req.Node); err != nil {
+		return err
+	}
+	return p.c.TxnCommit(req, resp)
+}
+
+func (p *peerRPC) TxnAbort(req *TxnAbortReq, resp *TxnAbortResp) error {
+	if err := p.is(req.Node); err != nil {
+		return err
+	}
+	return p.c.TxnAbort(req, resp)
+}
+
+func (p *peerRPC) TxnState(req *TxnStateReq, resp *TxnStateResp) error {
+	if err := p.is(req.Node); err != nil {
+		return err
+	}
+	return p.c.TxnState(req, resp)
+}
+
+func (p *peerRPC) TxnReplicaPrepare(req *TxnReplicaReq, resp *TxnReplicaResp) error {
+	if err := p.is(req.Node); err != nil {
+		return err
+	}
+	return p.c.TxnReplicaPrepare(req, resp)
+}
+
+func (p *peerRPC) TxnReplicaCommit(req *TxnReplicaReq, resp *TxnReplicaResp) error {
+	if err := p.is(req.Node); err != nil {
+		return err
+	}
+	return p.c.TxnReplicaCommit(req, resp)
+}
+
+func (p *peerRPC) TxnReplicaAbort(req *TxnReplicaReq, resp *TxnReplicaResp) error {
+	if err := p.is(req.Node); err != nil {
+		return err
+	}
+	return p.c.TxnReplicaAbort(req, resp)
+}

@@ -250,6 +250,13 @@ func TestPeerRPCSenders(t *testing.T) {
 		"Replicate":      func() error { return p.Replicate(&ReplicateReq{Node: "three"}, &b) },
 		"Resync":         func() error { return p.Resync(&ResyncReq{Node: "three"}, &b) },
 		"Revocations":    func() error { return p.Revocations(&RevocationsReq{Node: "three"}, &RevocationsResp{}) },
+		"TxnPrepare":         func() error { return p.TxnPrepare(&TxnPrepareReq{Node: "three"}, &TxnPrepareResp{}) },
+		"TxnCommit":          func() error { return p.TxnCommit(&TxnCommitReq{Node: "three"}, &TxnCommitResp{}) },
+		"TxnAbort":           func() error { return p.TxnAbort(&TxnAbortReq{Node: "three"}, &TxnAbortResp{}) },
+		"TxnState":           func() error { return p.TxnState(&TxnStateReq{Node: "three"}, &TxnStateResp{}) },
+		"TxnReplicaPrepare":  func() error { return p.TxnReplicaPrepare(&TxnReplicaReq{Node: "three"}, &TxnReplicaResp{}) },
+		"TxnReplicaCommit":   func() error { return p.TxnReplicaCommit(&TxnReplicaReq{Node: "three"}, &TxnReplicaResp{}) },
+		"TxnReplicaAbort":    func() error { return p.TxnReplicaAbort(&TxnReplicaReq{Node: "three"}, &TxnReplicaResp{}) },
 	}
 	for name, call := range calls {
 		if err := call(); err == nil || !strings.Contains(err.Error(), `names "three"`) {

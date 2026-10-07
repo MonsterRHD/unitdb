@@ -77,6 +77,19 @@ type _Conn struct {
 	closeC  chan struct{}
 	closed  uint32
 	tracked bool // counted in service.conns until closed
+
+	// testCluster overrides the cluster a transaction coordinator plans
+	// against; tests set it, production leaves it nil and uses Globals.
+	testCluster *Cluster
+}
+
+// clusterRef returns the cluster this connection's transaction coordinator
+// uses: the test override when set, the process cluster otherwise.
+func (c *_Conn) clusterRef() *Cluster {
+	if c.testCluster != nil {
+		return c.testCluster
+	}
+	return Globals.Cluster
 }
 
 func (s *_Service) newConn(t net.Conn) *_Conn {
@@ -453,22 +466,38 @@ func isReliable(mode uint8) bool {
 	return mode == 1 || mode == 2
 }
 
-// publish publishes a message to everyone and returns the number of outgoing bytes written.
+// publish publishes a message to everyone. It is the pre-transaction path,
+// still used by forwarded single messages and the mixed-version fallback:
+// storage and replication happen at the caller, and the inbound meters and
+// fan-out are counted here.
 func (c *_Conn) publish(pub utp.Publish, topic *security.Topic, pubMsg *utp.PublishMessage) (err error) {
 	c.service.meter.InMsgs.Inc(1)
 	c.service.meter.InBytes.Inc(int64(len(pubMsg.Payload)))
+	fanoutCommitted(c.service, Globals.Cluster, c.clientID.Contract(), pub.MessageID, pub.DeliveryMode, topic, pubMsg.Payload)
+	return nil
+}
+
+// fanoutCommitted delivers one committed publish message to the topic's
+// subscribers: local connections, and clients connected to other nodes via
+// their origin node. It is independent of the publisher connection, so a
+// topic owner committing a staged batch - including after a retry or a
+// failover - fans the message out from explicit parameters. The cluster view
+// is captured at the commit decision, so a later rehash does not change a
+// fan-out already in flight. Outbound meters are counted here; inbound
+// meters and storage are the commit path's.
+func fanoutCommitted(svc *_Service, cl *Cluster, contract uint32, messageID uint16, publisherMode uint8, topic *security.Topic, payload []byte) {
 	// subscription count
 	msgCount := 0
 
-	subscriptions, err := store.Subscription.Get(c.clientID.Contract(), topic.Topic)
+	subscriptions, err := store.Subscription.Get(contract, topic.Topic)
 	if err != nil {
 		log.ErrLogger.Err(err).Str("context", "conn.publish")
-		return err
+		return
 	}
 	msg := &message.Message{
-		MessageID: pub.MessageID,
+		MessageID: messageID,
 		Topic:     string(topic.Topic[:topic.Size]),
-		Payload:   pubMsg.Payload,
+		Payload:   payload,
 	}
 	connections := make(map[uint32]*utp.Subscription)
 	for _, subscription := range subscriptions {
@@ -492,7 +521,7 @@ func (c *_Conn) publish(pub utp.Publish, topic *security.Topic, pubMsg *utp.Publ
 		out.Delay = subscription.Delay
 		// Publisher's and subscriber's DeliveryMode RELIABLE or BATCH: the
 		// subscriber fetches the message from the log.
-		reliable := isReliable(pub.DeliveryMode) && isReliable(subscription.DeliveryMode)
+		reliable := isReliable(publisherMode) && isReliable(subscription.DeliveryMode)
 		if sub.clnode != nil {
 			remote[sub.clnode] = append(remote[sub.clnode], Delivery{ConnID: sub.connID, Message: &out, Reliable: reliable})
 			if !reliable {
@@ -508,11 +537,9 @@ func (c *_Conn) publish(pub utp.Publish, topic *security.Topic, pubMsg *utp.Publ
 			msgCount++
 		}
 	}
-	Globals.Cluster.deliverRemote(remote)
-	c.service.meter.OutMsgs.Inc(int64(msgCount))
-	c.service.meter.OutBytes.Inc(msg.Size() * int64(msgCount))
-
-	return nil
+	cl.deliverRemote(remote)
+	svc.meter.OutMsgs.Inc(int64(msgCount))
+	svc.meter.OutBytes.Inc(msg.Size() * int64(msgCount))
 }
 
 // deliver delivers a message to the connection's client: logged for the client

@@ -1,0 +1,25 @@
+rubrics:
+  - id: 1
+    type: f2p
+    text: 多消息请求在任何存储、复制或投递前完成每条消息的 topic 格式、保留主题和写权限校验。
+  - id: 2
+    type: f2p
+    text: 本地主题与远端 owner 都准备成功后才提交整批，远端路由变化不会把同一批拆给两个 owner。
+  - id: 3
+    type: f2p
+    text: 可靠或批量 delivery mode 在要求的副本确认前不向订阅者暴露消息，也不返回成功 ACK。
+  - id: 4
+    type: f2p
+    text: 任一主题的授权、路由、存储或副本失败都不会留下该批次的部分历史、投递或计量。
+  - id: 5
+    type: f2p
+    text: 同一连接或重连后以相同 MessageID 重试已提交批次，只返回原结果且不重复存储和投递。
+  - id: 6
+    type: f2p
+    text: 进程退出或 owner 故障转移后能够区分已提交、待恢复和已撤销批次，并收敛到唯一结果。
+  - id: 7
+    type: p2p
+    text: 成功批次只产生一次 ACK，ACK 丢失后的恢复不会把未提交批次误报成功。
+  - id: 8
+    type: p2p
+    text: 单消息发布、unitdb 特殊请求、转发发布和现有 delivery mode 行为保持通过。

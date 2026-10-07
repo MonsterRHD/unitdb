@@ -73,9 +73,14 @@ const (
 	// others (Revocations). An older node is sent none, and refuses no id
 	// or key for being revoked.
 	capRevocations = "revocations"
+	// capTxnPublish: the node takes multi-topic publish transactions
+	// (TxPrepare/TxCommit/TxAbort/TxState) and transactionally stages
+	// replica copies (TxReplicaPrepare/...). A coordinator talking to an
+	// owner without it serves the batch on the pre-transaction path.
+	capTxnPublish = "txnpublish"
 )
 
-var allCapabilities = []string{capReplicate, capDeliver, capSessions, capResync, capService, capV2Keys, capRevocations}
+var allCapabilities = []string{capReplicate, capDeliver, capSessions, capResync, capService, capV2Keys, capRevocations, capTxnPublish}
 
 // ownCapabilities are what this node can do: all of them, unless the
 // UNITDB_CLUSTER_CAPS environment variable lists fewer ("none" for none), so

@@ -137,10 +137,19 @@ func (db *DB) startSyncer(interval time.Duration) {
 			case <-db.internal.closeC:
 				return
 			case <-syncTicker.C:
-				if err := db.Sync(); err != nil {
-					logger.Error().Err(err).Str("context", "startSyncer").Msg("Error syncing to db")
-					panic(err)
+			// A tick can be ready as the database closes, when the closeC
+			// case is too: Sync then reports the database closed, which is a
+			// shutdown and not a sync failure, so it must not panic.
+			if db.isClosed() {
+				return
+			}
+			if err := db.Sync(); err != nil {
+				if db.isClosed() {
+					return
 				}
+				logger.Error().Err(err).Str("context", "startSyncer").Msg("Error syncing to db")
+				panic(err)
+			}
 			}
 		}
 	}()

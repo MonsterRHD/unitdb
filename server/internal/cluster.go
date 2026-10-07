@@ -320,6 +320,9 @@ type FetchSessionResp struct {
 
 // ClusterSess is a basic info on a remote session where the message was created.
 type ClusterSess struct {
+	// Node the session originates from. Set for transactional batch RPCs;
+	// the older ClusterReq carries it as a field of its own.
+	Node string
 	// IP address of the client. For long polling this is the IP of the last poll
 	RemoteAddr string
 	// protocol - NONE (unset), RPC, GRPC, GRPC_WEB, WEBSOCK
@@ -490,6 +493,32 @@ func (n *ClusterNode) resync() {
 		go c.rebalance(map[string]bool{n.name: true})
 		go c.handoff(n.name)
 		go c.pushRevocations(n)
+	}
+}
+
+// peerBack is called when a peer answers an inbound RPC (its startup Resync,
+// a leader Ping): the restarted node is reachable again even though this
+// node's persistent connection to it may still be the closed one. Replacing
+// it now hands the node its hints immediately - messages stored for it while
+// it was out, including a batch's unconfirmed replica copy - instead of
+// waiting for the next outbound call to notice the dead endpoint.
+func (c *Cluster) peerBack(name string) {
+	if c == nil || name == "" || name == c.thisNodeName {
+		return
+	}
+	n := c.nodes[name]
+	if n == nil {
+		return
+	}
+	n.lock.Lock()
+	stale := n.connected && n.conn != nil && n.conn.isClosed()
+	n.lock.Unlock()
+	if !stale {
+		return
+	}
+	// client() redials under the node lock and, on success, runs resync().
+	if _, connected := n.client(); !connected {
+		log.ErrLogger.Warn().Str("context", "cluster.peerBack").Str("node", name).Msg("a peer signalled it is back but it cannot be redialed yet")
 	}
 }
 
@@ -700,6 +729,13 @@ func (s *seenSet) add(id string) bool {
 	s.next = (s.next + 1) % seenReplicas
 	s.ids[id] = true
 	return true
+}
+
+// has reports whether id is currently held.
+func (s *seenSet) has(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ids[id]
 }
 
 // remove removes id, added for a message that could not be stored after all.
@@ -1092,7 +1128,6 @@ func (c *Cluster) replicate(contract uint32, name, topic string, payload []byte,
 	if c == nil || c.replicas < 2 || isWildcardTopic(name) || !hasCapability(capReplicate) {
 		return
 	}
-	key := topicRingKey(contract, name)
 	e := ReplicaEntry{
 		ID:        c.replicaIDPrefix + strconv.FormatUint(c.replicaSeq.Add(1), 36),
 		Contract:  contract,
@@ -1101,12 +1136,36 @@ func (c *Cluster) replicate(contract uint32, name, topic string, payload []byte,
 		Ttl:       ttl,
 		ExpiresAt: store.ExpiresAt(ttl),
 	}
+	c.replicateEntry(e, wait, "")
+}
+
+// replicateEntry sends one entry to every other node that holds its topic,
+// exactly as replicate does for a freshly stored message. A pre-built entry
+// lets transactional batches reuse it with their deterministic replication
+// ids. wait asks the first capable holder to store it synchronously. A
+// holder that cannot take it (older, frozen, queue full) gets a hint, and so
+// does every holder the current ring does not contain yet: that hint is how a
+// dead owner receives messages stored while it was out once it rejoins.
+// skipLive names one live holder this call must not send to, because it
+// already holds the entry through a transaction's synchronous prepare.
+func (c *Cluster) replicateEntry(e ReplicaEntry, wait bool, skipLive string) {
+	name := e.Topic
+	if i := strings.IndexByte(name, '?'); i >= 0 {
+		name = name[:i]
+	}
+	if c == nil || c.replicas < 2 || isWildcardTopic(name) || !hasCapability(capReplicate) {
+		return
+	}
+	key := topicRingKey(e.Contract, name)
 	live := make(map[string]bool)
 	for _, n := range c.getRingNodes() {
 		live[n] = true
 	}
 	stored := false
 	for _, replica := range c.getRing().GetN(key, c.replicas) {
+		if replica == skipLive {
+			continue // holds its staged copy already
+		}
 		n := c.nodes[replica]
 		if n == nil {
 			continue // this node
@@ -1131,7 +1190,7 @@ func (c *Cluster) replicate(contract uint32, name, topic string, payload []byte,
 		}
 	}
 	if wait && !stored {
-		log.ErrLogger.Warn().Str("context", "cluster.replicate").Str("topic", name).Msg("no replica took the message: stored on this node only")
+		log.ErrLogger.Warn().Str("context", "cluster.replicate").Str("topic", e.Topic).Msg("no replica took the message: stored on this node only")
 	}
 	for _, replica := range c.getFullRing().GetN(key, c.replicas) {
 		if !live[replica] {
@@ -2270,6 +2329,9 @@ func (c *Cluster) Resync(req *ResyncReq, unused *bool) error {
 	if err := refuse(capResync); err != nil {
 		return err
 	}
+	// A starting node sends this over a fresh connection: redial the
+	// persistent one and hand it the hints waiting for it.
+	c.peerBack(req.Node)
 	if req.Wait {
 		c.rebalance(map[string]bool{req.Node: true})
 		return nil

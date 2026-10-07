@@ -619,20 +619,23 @@ func (c *_Conn) onPublish(pub utp.Publish) *types.Error {
 		log.ErrLogger.Debug().Str("context", "conn.onPublish").Int64("duration", time.Since(start).Nanoseconds()).Msg("")
 	}()
 
+	// Validate every message before anything changes: one malformed,
+	// reserved or unauthorized message fails the whole publish with no side
+	// effects - no special request runs, no message is stored or delivered.
+	specials := make([]*utp.PublishMessage, 0)
+	normals := make([]*validatedMsg, 0, len(pub.Messages))
 	for _, pubMsg := range pub.Messages {
-		//Parse the key
 		topic := security.ParseKey(pubMsg.Topic)
 		if topic.TopicType == security.TopicInvalid {
 			return types.ErrBadRequest
 		}
 
-		// Check whether the key is 'unitdb' which means it's an API request
+		// An API request ('unitdb' key): collected now, served only after
+		// every normal message passed validation. A forwarded one is
+		// answered by no node and dropped.
 		if len(topic.Key) == 6 && string(topic.Key) == "unitdb" {
-			// Answered by the client's own node: a node forwards none, so
-			// one that comes forwarded is dropped, rather than vouch for a
-			// proxied connection.
 			if !pub.IsForwarded {
-				c.onSpecialRequest(topic, pubMsg.Payload)
+				specials = append(specials, pubMsg)
 			}
 			continue
 		}
@@ -649,8 +652,46 @@ func (c *_Conn) onPublish(pub utp.Publish) *types.Error {
 				return types.ErrForbidden
 			}
 		}
+		normals = append(normals, &validatedMsg{msg: pubMsg, topic: topic})
+	}
 
-		if name := topic.Topic[:topic.Size]; !pub.IsForwarded && Globals.Cluster.isRemoteTopic(c.clientID.Contract(), name) {
+	// All checks passed: serve the special requests in request order.
+	for _, req := range specials {
+		c.onSpecialRequest(security.ParseKey(req.Topic), req.Payload)
+	}
+
+	if len(normals) == 0 {
+		if pub.IsForwarded {
+			return nil
+		}
+		return c.acknowledge(pub)
+	}
+
+	// The normal messages are one transaction: all prepared before any is
+	// visible, one ACK on commit. A participant that cannot take
+	// transactional batches (an older peer) sends the batch on the
+	// pre-transaction path.
+	legacy, terr := c.runBatchPublish(&pub, normals)
+	if !legacy {
+		if terr != nil {
+			return terr
+		}
+		if pub.IsForwarded {
+			return nil
+		}
+		return c.acknowledge(pub)
+	}
+	return c.onPublishLegacy(pub, normals)
+}
+
+// onPublishLegacy is the pre-transaction per-message path, used when a remote
+// owner cannot take transactional batches. Special requests were already
+// served, so only normal messages reach it.
+func (c *_Conn) onPublishLegacy(pub utp.Publish, normals []*validatedMsg) *types.Error {
+	for _, vm := range normals {
+		pubMsg, topic := vm.msg, vm.topic
+		name := string(topic.Topic[:topic.Size])
+		if !pub.IsForwarded && Globals.Cluster.isRemoteTopic(c.clientID.Contract(), name) {
 			// The topic's owner stores the message and delivers it.
 			fwd := &utp.Publish{MessageID: pub.MessageID, DeliveryMode: pub.DeliveryMode, Messages: []*utp.PublishMessage{pubMsg}}
 			forwarded, err := Globals.Cluster.routeToTopic(fwd, c.clientID.Contract(), name, c)

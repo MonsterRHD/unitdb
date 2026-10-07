@@ -216,6 +216,13 @@ type serverOpts struct {
 	// bin is the server binary to run, such as an older version's
 	// (oldServerBinary); the one built from this tree if empty.
 	bin string
+	// tcpAddr/grpcAddr reuse these listen addresses instead of allocating
+	// new ones, for a node restarted in place with the same identity.
+	tcpAddr  string
+	grpcAddr string
+	// dbPath reuses this database directory instead of creating a new one,
+	// for a node restarted on its own store.
+	dbPath string
 }
 
 func startServerWith(t *testing.T, opts serverOpts) *server {
@@ -240,24 +247,34 @@ func startServerWith(t *testing.T, opts serverOpts) *server {
 	// but each writes its own db_path, so a per-instance conf name avoids
 	// clobbering. main.go joins Dir(exe)+config, so use a plain filename.
 	confName := fmt.Sprintf("e2e-%d.conf", freePort(t))
-	tcpPort := freePort(t)
-	grpcPort := freePort(t)
-	dbPath, err := os.MkdirTemp("", "unitdb-e2e-db")
-	if err != nil {
-		t.Fatal(err)
+	tcpAddr := opts.tcpAddr
+	grpcAddr := opts.grpcAddr
+	if tcpAddr == "" {
+		tcpAddr = fmt.Sprintf("127.0.0.1:%d", freePort(t))
+	}
+	if grpcAddr == "" {
+		grpcAddr = fmt.Sprintf("127.0.0.1:%d", freePort(t))
+	}
+	dbPath := opts.dbPath
+	if dbPath == "" {
+		var err error
+		dbPath, err = os.MkdirTemp("", "unitdb-e2e-db")
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	confWith := func(cluster string) string {
 		return fmt.Sprintf(`{
-  "listen": "127.0.0.1:%d",
-  "grpc_listen": "127.0.0.1:%d",
+  "listen": %q,
+  "grpc_listen": %q,
   "logging_level": %q,
   "allow_insecure": %t,
   %s
   "encryption_config": {"key": %q, "identifier": "local", "sealed": false, "timestamp": 1522325758},
   "cluster_config": %s,
   "store_config": {"reset": false, "adapters": {"unitdb": {"database": "unitdb", "mem_size": 500000000}}}
-}`, tcpPort, grpcPort, opts.logLevel, opts.allowInsecure, opts.extra, opts.key, cluster)
-	}
+}`, tcpAddr, grpcAddr, opts.logLevel, opts.allowInsecure, opts.extra, opts.key, cluster)
+}
 	confPath := filepath.Join(binDir, confName)
 	if err := os.WriteFile(confPath, []byte(confWith(opts.cluster)), 0644); err != nil {
 		t.Fatal(err)
@@ -276,8 +293,8 @@ func startServerWith(t *testing.T, opts serverOpts) *server {
 		t:        t,
 		cmd:      cmd,
 		dbPath:   dbPath,
-		tcpAddr:  fmt.Sprintf("127.0.0.1:%d", tcpPort),
-		grpcAddr: fmt.Sprintf("127.0.0.1:%d", grpcPort),
+		tcpAddr:  tcpAddr,
+		grpcAddr: grpcAddr,
 		logs:     logs,
 		env:      opts.env,
 		noWait:   opts.expectExit,

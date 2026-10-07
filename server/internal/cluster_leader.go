@@ -173,6 +173,9 @@ func (c *Cluster) Ping(ping *ClusterPing, pong *ClusterPong) error {
 			n.setCapabilities(nc)
 		}
 	}
+	// A leader that restarted pings on a fresh connection: redial the
+	// persistent one and hand it the hints waiting for it.
+	c.peerBack(ping.Leader)
 	*pong = ClusterPong{Node: c.thisNodeName, NodeCapabilities: ownNodeCapabilities(), Leaving: c.leaving.Load(), RingVersion: int(c.clusterRing.Load())}
 	select {
 	case c.fo.leaderPing <- ping:

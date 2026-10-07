@@ -158,6 +158,10 @@ func NewService(cfg *config.Config) (s *_Service, err error) {
 		return nil, err
 	}
 
+	// Resolve in-doubt multi-topic publish transactions whose commit did
+	// not finish in the client attempt that decided them.
+	startTxnResolver(s.context, s)
+
 	go func() {
 		ticker := time.NewTicker(1 * time.Minute)
 		for {

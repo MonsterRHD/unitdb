@@ -43,6 +43,22 @@ const (
 	sysIndex         = "index"
 	sysSeen          = "seen"
 	sysSecurity      = "security"
+
+	// Transactional publish records (see tx.go): messages staged by an owner
+	// participant (sysTxStage) and by a replica participant (sysTxReplicaStage),
+	// each participant's state of a batch (sysTxRegistry, sysTxReplicaRegistry),
+	// the coordinator's commit decision (sysTxDecision), and the indexes that
+	// enumerate them for recovery. None is readable by a client request: the
+	// topics are reserved, and staged/registry records are never read as a
+	// topic's history.
+	sysTxStage           = "txstage"
+	sysTxReplicaStage    = "txrstage"
+	sysTxRegistry        = "txreg"
+	sysTxReplicaRegistry = "txrreg"
+	sysTxDecision        = "txdec"
+	sysTxIndex           = "txindex"
+	sysTxReplicaIndex    = "txrindex"
+	sysTxDecisionIndex   = "txdindex"
 )
 
 // sysTopic returns the topic the store keeps a record of kind for topic

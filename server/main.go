@@ -100,6 +100,12 @@ func main() {
 		internal.Globals.Cluster.Start()
 	}
 
+	// Finish multi-topic publish transactions that were durable when this
+	// process stopped: committed decisions are driven to their participants,
+	// prepared decisions without a terminal commit are presumed aborted, and
+	// committed participant promotions left unfinished are completed.
+	internal.RecoverTransactions()
+
 	// Listen and serve
 	svc.Listen()
 	log.Info("main", "Service is running at port "+cfg.Listen)
