@@ -325,3 +325,10 @@ func (p *peerRPC) Revocations(req *RevocationsReq, resp *RevocationsResp) error 
 	}
 	return p.c.Revocations(req, resp)
 }
+
+func (p *peerRPC) RetireScan(req *RetireScanReq, resp *RetireScanResp) error {
+	if err := p.is(req.Node); err != nil {
+		return err
+	}
+	return p.c.RetireScan(req, resp)
+}

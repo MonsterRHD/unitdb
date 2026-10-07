@@ -17,6 +17,7 @@
 package internal
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -127,15 +128,28 @@ var securityState atomic.Pointer[revocations]
 type revocations struct {
 	mu        sync.RWMutex
 	contracts map[uint32]*ContractState
+	// retired is the contracts' retirements, one per contract for ever, by
+	// their generation. A retired contract's ContractState is not kept: the
+	// retirement refuses every id and key, whatever their issue time.
+	retired map[uint32]*Retirement
 	// ids are the store's records of the state, deleted once a newer one
 	// is written.
 	ids [][]byte
+
+	// Local progress through each retirement, and the sessions purged with
+	// one, for fencing a late session-log hint. retireMu serializes the
+	// phase transitions; the two maps are read with it too.
+	retireMu     sync.Mutex
+	progress     map[uint32]store.RetireProgress
+	retireBlocks map[uint32]bool
 }
 
 // securityRecord is a record of the security state in the store.
 type securityRecord struct {
 	ID        []byte                    `json:"id"`
 	Contracts map[uint32]*ContractState `json:"contracts"`
+	// Retired is the contracts' retirements, held for ever.
+	Retired map[uint32]*Retirement `json:"retired,omitempty"`
 }
 
 // loadRevocations reads the security state from the store, and makes it
@@ -146,7 +160,7 @@ type securityRecord struct {
 // state written where it is kept now, and then they are deleted: a crash in
 // between leaves them to be merged again, which changes nothing.
 func loadRevocations() (*revocations, error) {
-	r := &revocations{contracts: make(map[uint32]*ContractState)}
+	r := &revocations{contracts: make(map[uint32]*ContractState), retired: make(map[uint32]*Retirement), progress: make(map[uint32]store.RetireProgress), retireBlocks: make(map[uint32]bool)}
 	raw, err := store.Security.All()
 	if err != nil {
 		log.ErrLogger.Error().Err(err).Str("context", "revocations").Msg("unable to read the security state")
@@ -156,7 +170,10 @@ func loadRevocations() (*revocations, error) {
 		return nil, fmt.Errorf("revocations: reading the security state of an older version: %w", err)
 	}
 	now := time.Now().Unix()
-	for i, b := range append(raw, legacy...) {
+	all := append(raw, legacy...)
+	// Retirements first, so that the revocation records of a retired
+	// contract are dropped as the records are merged.
+	for i, b := range all {
 		var rec securityRecord
 		if err := json.Unmarshal(b, &rec); err != nil {
 			log.ErrLogger.Error().Err(err).Str("context", "revocations").Msg("unreadable record of the security state: skipped")
@@ -165,7 +182,30 @@ func loadRevocations() (*revocations, error) {
 		if i < len(raw) && len(rec.ID) > 0 {
 			r.ids = append(r.ids, rec.ID)
 		}
+		r.mergeRetiredLocked(rec.Retired)
+	}
+	for i, b := range all {
+		var rec securityRecord
+		if err := json.Unmarshal(b, &rec); err != nil {
+			continue
+		}
+		if i < len(raw) && len(rec.ID) > 0 && !hasID(r.ids, rec.ID) {
+			r.ids = append(r.ids, rec.ID)
+		}
 		r.mergeLocked(rec.Contracts, now)
+	}
+	// This node's progress through retirements it knew. The retirements
+	// themselves are in the state above, so a node enforces them from boot,
+	// before it serves, and resumes the phases it had not confirmed.
+	progress, err := store.RetireProgressAll()
+	if err != nil {
+		return nil, fmt.Errorf("revocations: reading retirement progress: %w", err)
+	}
+	for _, p := range progress {
+		r.progress[p.Contract] = p
+		for _, b := range p.Blocks {
+			r.retireBlocks[b] = true
+		}
 	}
 	if len(r.ids) > 1 || len(legacyIDs) > 0 {
 		r.mu.Lock()
@@ -188,6 +228,16 @@ func loadRevocations() (*revocations, error) {
 	}
 	securityState.Store(r)
 	return r, nil
+}
+
+// hasID reports whether ids hold id.
+func hasID(ids [][]byte, id []byte) bool {
+	for _, x := range ids {
+		if bytes.Equal(x, id) {
+			return true
+		}
+	}
+	return false
 }
 
 // refuses returns why the client id or topic key of contract with uuid (0
@@ -215,18 +265,35 @@ func (r *revocations) refuses(contract uint32, uuid uint64, issuedAt uint32) str
 // to every other node but from, if set: the node changes came from. It
 // returns what changed, as it is now.
 func (r *revocations) apply(changes map[uint32]*ContractState, from string) (map[uint32]*ContractState, error) {
+	changed, _, err := r.applyAll(changes, nil, from)
+	return changed, err
+}
+
+// applyAll merges revocation and retirement changes into the state, saves it
+// once, and sends what changed to every other node but from, if set. It
+// returns each part that changed, as it is now. Retirements are merged first:
+// a retired contract's revocation records are dropped whatever the change
+// carries.
+func (r *revocations) applyAll(changes map[uint32]*ContractState, retired map[uint32]*Retirement, from string) (map[uint32]*ContractState, map[uint32]*Retirement, error) {
 	r.mu.Lock()
-	changed := r.mergeLocked(changes, time.Now().Unix())
+	changedR := r.mergeRetiredLocked(retired)
+	changedC := r.mergeLocked(changes, time.Now().Unix())
 	var err error
-	if len(changed) > 0 {
+	if len(changedC) > 0 || len(changedR) > 0 {
 		err = r.saveLocked()
 	}
 	r.mu.Unlock()
-	if len(changed) > 0 {
+	if err == nil && (len(changedC) > 0 || len(changedR) > 0) {
 		if c := Globals.Cluster; c != nil {
-			go c.sendRevocations(changed, nil, from)
+			go c.sendRevocations(changedC, changedR, nil, from)
 		}
 	}
+	return changedC, changedR, err
+}
+
+// applyRetired merges retirement changes, saves and sends them.
+func (r *revocations) applyRetired(retired map[uint32]*Retirement, from string) (map[uint32]*Retirement, error) {
+	_, changed, err := r.applyAll(nil, retired, from)
 	return changed, err
 }
 
@@ -236,6 +303,13 @@ func (r *revocations) mergeLocked(changes map[uint32]*ContractState, now int64) 
 	changed := make(map[uint32]*ContractState)
 	for contract, o := range changes {
 		if o == nil {
+			continue
+		}
+		if r.retired[contract] != nil {
+			// A retired contract keeps no revocation records: the
+			// retirement refuses every id and key, and the purge removed
+			// them on every node. Never take them from another node.
+			delete(r.contracts, contract)
 			continue
 		}
 		s := r.contracts[contract]
@@ -262,7 +336,7 @@ func (r *revocations) saveLocked() error {
 	if err != nil {
 		return err
 	}
-	b, err := json.Marshal(securityRecord{ID: id, Contracts: r.contracts})
+	b, err := json.Marshal(securityRecord{ID: id, Contracts: r.contracts, Retired: r.retired})
 	if err != nil {
 		return err
 	}
@@ -292,10 +366,12 @@ func (r *revocations) all() map[uint32]*ContractState {
 
 // RevocationsReq carries security state from one node to another: what
 // changed, or with Full the sender's whole state, which the receiver answers
-// with its own.
+// with its own. Retired carries contracts' retirements, to nodes that support
+// them: an older node is sent none.
 type RevocationsReq struct {
 	Node      string
 	Contracts map[uint32]*ContractState
+	Retired   map[uint32]*Retirement
 	Full      bool
 }
 
@@ -303,12 +379,14 @@ type RevocationsReq struct {
 // state.
 type RevocationsResp struct {
 	Contracts map[uint32]*ContractState
+	Retired   map[uint32]*Retirement
 }
 
 // sendRevocations sends changes to every other node but skip, or to the
 // node to only. With to, it sends the whole state, and merges the node's
-// whole state, its answer.
-func (c *Cluster) sendRevocations(changes map[uint32]*ContractState, to *ClusterNode, skip string) {
+// whole state, its answer. Retirements are sent only to nodes that support
+// them, as older nodes know nothing of them.
+func (c *Cluster) sendRevocations(changes map[uint32]*ContractState, retired map[uint32]*Retirement, to *ClusterNode, skip string) {
 	if c == nil || !hasCapability(capRevocations) {
 		return
 	}
@@ -322,10 +400,13 @@ func (c *Cluster) sendRevocations(changes map[uint32]*ContractState, to *Cluster
 			}
 		}
 	}
-	req := &RevocationsReq{Node: c.thisNodeName, Contracts: changes, Full: to != nil}
 	for _, n := range nodes {
 		if !n.supports(capRevocations) {
 			continue
+		}
+		req := &RevocationsReq{Node: c.thisNodeName, Contracts: changes, Full: to != nil}
+		if hasCapability(capRetire) && n.supports(capRetire) {
+			req.Retired = retired
 		}
 		var resp RevocationsResp
 		if err := n.callTimeout("Cluster.Revocations", req, &resp, revocationsTimeout); err != nil {
@@ -335,8 +416,8 @@ func (c *Cluster) sendRevocations(changes map[uint32]*ContractState, to *Cluster
 			}
 			continue
 		}
-		if r := securityState.Load(); r != nil && len(resp.Contracts) > 0 {
-			if _, err := r.apply(resp.Contracts, n.name); err != nil {
+		if r := securityState.Load(); r != nil && (len(resp.Contracts) > 0 || len(resp.Retired) > 0) {
+			if _, _, err := r.applyAll(resp.Contracts, resp.Retired, n.name); err != nil {
 				log.ErrLogger.Error().Err(err).Str("context", "revocations").Msg("unable to save the security state")
 			}
 		}
@@ -347,7 +428,7 @@ func (c *Cluster) sendRevocations(changes map[uint32]*ContractState, to *Cluster
 // (re)connected.
 func (c *Cluster) pushRevocations(n *ClusterNode) {
 	if r := securityState.Load(); r != nil {
-		c.sendRevocations(r.all(), n, "")
+		c.sendRevocations(r.all(), r.allRetired(), n, "")
 	}
 }
 
@@ -367,15 +448,25 @@ func (c *Cluster) Revocations(req *RevocationsReq, resp *RevocationsResp) error 
 	}
 	// The sender has the capability, whatever it told before.
 	n.hasNow(capRevocations)
+	if req.Retired != nil {
+		n.hasNow(capRetire)
+	}
 	r := securityState.Load()
 	if r == nil {
 		return errors.New("cluster: the security state is not loaded yet")
 	}
-	if _, err := r.apply(req.Contracts, req.Node); err != nil {
+	var retired map[uint32]*Retirement
+	if hasCapability(capRetire) {
+		retired = req.Retired
+	}
+	if _, _, err := r.applyAll(req.Contracts, retired, req.Node); err != nil {
 		log.ErrLogger.Error().Err(err).Str("context", "revocations").Msg("unable to save the security state")
 	}
 	if req.Full {
 		resp.Contracts = r.all()
+		if hasCapability(capRetire) {
+			resp.Retired = r.allRetired()
+		}
 	}
 	return nil
 }
@@ -389,6 +480,11 @@ func (c *_Conn) onRevoke(payload []byte) (interface{}, bool) {
 	}
 	if !c.clientID.IsPrimary() {
 		return types.ErrForbidden, false
+	}
+	if c.service.revocations.isRetired(c.clientID.Contract()) {
+		// A retired contract keeps no revocation records: its retirement
+		// refuses every id and key.
+		return types.ErrContractRetired, false
 	}
 	var req types.RevokeRequest
 	if err := json.Unmarshal(payload, &req); err != nil {

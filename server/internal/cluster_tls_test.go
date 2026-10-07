@@ -250,6 +250,7 @@ func TestPeerRPCSenders(t *testing.T) {
 		"Replicate":      func() error { return p.Replicate(&ReplicateReq{Node: "three"}, &b) },
 		"Resync":         func() error { return p.Resync(&ResyncReq{Node: "three"}, &b) },
 		"Revocations":    func() error { return p.Revocations(&RevocationsReq{Node: "three"}, &RevocationsResp{}) },
+		"RetireScan":     func() error { return p.RetireScan(&RetireScanReq{Node: "three"}, &RetireScanResp{}) },
 	}
 	for name, call := range calls {
 		if err := call(); err == nil || !strings.Contains(err.Error(), `names "three"`) {

@@ -43,6 +43,11 @@ const (
 	sysIndex         = "index"
 	sysSeen          = "seen"
 	sysSecurity      = "security"
+	// sysRetire holds this node's own progress through each contract's
+	// retirement: the phase it confirmed for the generation. It never holds
+	// the retirement itself, which, like the security state, is held by every
+	// node.
+	sysRetire = "retire"
 )
 
 // sysTopic returns the topic the store keeps a record of kind for topic

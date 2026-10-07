@@ -64,6 +64,11 @@ var (
 	// ErrV1Key refuses a v1 signed topic key or an unsigned one: generate a
 	// v2 key with unitdb/keygen.
 	ErrV1Key = &Error{ReturnCode: 0x04, Status: 401, Message: "Security key rejected. v1 and unsigned security keys are no longer accepted: generate a v2 key with keygen."}
+	// ErrContractRetired refuses everything of a contract that was retired
+	// (unitdb/retire): it can no longer connect, issue credentials, publish,
+	// subscribe, or read its history. Its primary id keeps only the retire
+	// request itself, to open the retirement and read its status.
+	ErrContractRetired = &Error{ReturnCode: 0x07, Status: 410, Message: "The contract has been retired and can no longer connect, issue credentials, or access its topics."}
 )
 
 type KeyGenRequest struct {
@@ -114,6 +119,49 @@ type RevokeRequest struct {
 // RevokeResponse answers a unitdb/revoke request that was taken.
 type RevokeResponse struct {
 	Status int `json:"status"`
+}
+
+// RetireRequest is a unitdb/retire request, from the contract's primary
+// client. With Confirm, it opens the contract's retirement, persistently; a
+// repeated request opens no second one, it answers with the same generation
+// and its status. Without Confirm, it only reads the status.
+type RetireRequest struct {
+	// Confirm must be set to open the retirement: it is irreversible.
+	Confirm bool `json:"confirm,omitempty"`
+}
+
+// Retirement phases, as the answer reports them.
+const (
+	RetireBarred   = "barred"   // every reachable node refuses the contract
+	RetireDraining = "draining" // connections are closed and subscriptions removed
+	RetirePurging  = "purging"  // messages and security state are deleted
+	RetireDone     = "done"     // every reachable owner confirmed an empty scan
+)
+
+// RetireNodeStatus is one node's part in a retirement: the phase it
+// confirmed, whether it is reached, and the resources it still holds of the
+// contract when it did not confirm the purge, or could not be asked.
+type RetireNodeStatus struct {
+	Node      string         `json:"node"`
+	Reachable bool           `json:"reachable"`
+	Phase     int            `json:"phase"`
+	State     string         `json:"state"`
+	Remaining map[string]int `json:"remaining,omitempty"`
+}
+
+// RetireResponse answers a unitdb/retire request: the generation, how far the
+// retirement is, and what blocks it: a node not reached or not through its
+// phases, and resources a node still holds.
+type RetireResponse struct {
+	Status     int                `json:"status"`
+	Contract   uint32             `json:"contract"`
+	Generation uint64             `json:"generation"`
+	State      string             `json:"state"`
+	Done       bool               `json:"done"`
+	Nodes      []RetireNodeStatus `json:"nodes,omitempty"`
+	// Remaining are the resources still held on the node answering, when its
+	// own scan is not empty.
+	Remaining map[string]int `json:"remaining,omitempty"`
 }
 
 // ServiceResponse answers a unitdb/service request that vouched for the

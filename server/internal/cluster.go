@@ -1092,6 +1092,12 @@ func (c *Cluster) replicate(contract uint32, name, topic string, payload []byte,
 	if c == nil || c.replicas < 2 || isWildcardTopic(name) || !hasCapability(capReplicate) {
 		return
 	}
+	// A retired contract's messages are neither replicated nor hinted: its
+	// purge must be the last write of them, and a barrier already refused
+	// the publish on every reachable node.
+	if securityState.Load().isRetired(contract) {
+		return
+	}
 	key := topicRingKey(contract, name)
 	e := ReplicaEntry{
 		ID:        c.replicaIDPrefix + strconv.FormatUint(c.replicaSeq.Add(1), 36),
@@ -1173,6 +1179,30 @@ func storeHint(replica string, h replicaHint, ttl string) error {
 		return err
 	}
 	return putHint(replica, id, buf.Bytes(), ttl)
+}
+
+// dropRetiredPending drops the hints kept only in memory that refer to a
+// retired contract: messages of it, and log changes of its purged sessions.
+// The store's copy of them is removed by the purge.
+func (c *Cluster) dropRetiredPending(contract uint32) {
+	if c == nil {
+		return
+	}
+	c.pendingMu.Lock()
+	defer c.pendingMu.Unlock()
+	kept := c.pending[:0]
+	for _, p := range c.pending {
+		switch {
+		case p.hint.Op != nil && isRetiredBlock(p.hint.Op.Block):
+			continue
+		case p.hint.Op == nil && p.hint.Entry.Contract == contract:
+			c.seen.remove(p.hint.Entry.ID)
+			continue
+		default:
+			kept = append(kept, p)
+		}
+	}
+	c.pending = kept
 }
 
 // storePendingHints stores the hints kept in memory, and keeps those the
@@ -1276,11 +1306,29 @@ func (c *Cluster) handoff(name string) {
 			var sent []replicaHint
 			for _, h := range batch {
 				if h.Op != nil {
+					// A retired session's hint is obsolete: delete it rather
+					// than hand it off and recreate the log.
+					if isRetiredBlock(h.Op.Block) {
+						if err := store.Hint.Delete(name, h.ID); err != nil {
+							log.ErrLogger.Error().Err(err).Str("context", "cluster.handoff").Msg("unable to delete an obsolete hint for " + name)
+							return
+						}
+						continue
+					}
 					if !n.supports(capSessions) {
 						continue // kept until it can take it
 					}
 					req.Log = append(req.Log, currentState(*h.Op)...)
 				} else {
+					// A retired contract's hint is obsolete with its data.
+					if securityState.Load().isRetired(h.Entry.Contract) {
+						if err := store.Hint.Delete(name, h.ID); err != nil {
+							log.ErrLogger.Error().Err(err).Str("context", "cluster.handoff").Msg("unable to delete an obsolete hint for " + name)
+							return
+						}
+						c.seen.remove(h.Entry.ID)
+						continue
+					}
 					if !n.supports(capReplicate) {
 						continue
 					}
@@ -1444,6 +1492,12 @@ func (c *Cluster) rebuild() {
 		}
 		copied := 0
 		for _, t := range topics.Topics {
+			// A retired contract's messages are not rebuilt: the rebuilding
+			// node either retires the contract itself when it gets the
+			// state, or holds an empty copy of its topics.
+			if securityState.Load().isRetired(t.Contract) {
+				continue
+			}
 			var history RebuildHistoryResp
 			if err := n.callTimeout("Cluster.RebuildHistory", &RebuildHistoryReq{Node: c.thisNodeName, Topic: t}, &history, rebuildTimeout); err != nil {
 				log.ErrLogger.Error().Err(err).Str("context", "cluster.rebuild").Str("topic", t.Topic).Msg("topic not rebuilt from " + n.name)
@@ -1773,6 +1827,11 @@ func (c *Cluster) Replicate(req *ReplicateReq, unused *bool) error {
 		req.Entries = nil
 	}
 	for _, e := range req.Entries {
+		// A retired contract's data is never stored again: a late replica
+		// batch or a hint handed off after its purge is dropped as taken.
+		if securityState.Load().isRetired(e.Contract) {
+			continue
+		}
 		if e.ID != "" && !c.seen.add(e.ID) {
 			continue // stored already
 		}
@@ -1792,6 +1851,10 @@ func (c *Cluster) Replicate(req *ReplicateReq, unused *bool) error {
 		}
 	}
 	for _, op := range req.Log {
+		// A session log change of a retired session never comes back.
+		if isRetiredBlock(op.Block) {
+			continue
+		}
 		store.Log.Apply(op)
 	}
 	return nil

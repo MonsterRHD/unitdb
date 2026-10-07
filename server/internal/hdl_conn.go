@@ -97,6 +97,12 @@ func (c *_Conn) handler(inMsg lp.MessagePack) error {
 		return types.ErrUnauthorized
 	}
 
+	// The primary id of a retired contract can only open and read its
+	// retirement: everything else is refused, but the connection stays.
+	if c.retiredAdmin.Load() && inMsg.Type() != utp.CONNECT {
+		return c.handleRetiredAdmin(inMsg)
+	}
+
 	switch inMsg.Type() {
 	// An attempt to connect.
 	case utp.CONNECT:
@@ -149,6 +155,12 @@ func (c *_Conn) handler(inMsg lp.MessagePack) error {
 		c.clientID = clientID
 		c.MessageIds.Reset()
 
+		// A retired contract's primary id keeps only the retire request:
+		// no session, no batch manager, and no renewed id.
+		if c.retiredAdmin.Load() {
+			return nil
+		}
+
 		// batch manager
 		c.newBatchManager(&batchOptions{
 			batchDuration:       time.Duration(m.BatchDuration) * time.Millisecond,
@@ -177,7 +189,7 @@ func (c *_Conn) handler(inMsg lp.MessagePack) error {
 		}
 
 		// Take care of any messages in the store
-		sessID, found, foreign := ownedSession(sessKey, owner, true)
+		sessID, found, foreign := ownedSession(sessKey, owner, clientID.Contract(), true)
 		keepLegacy := false
 		if legacyKey != 0 {
 			if !found && !m.CleanSessFlag {
@@ -185,7 +197,7 @@ func (c *_Conn) handler(inMsg lp.MessagePack) error {
 			}
 			// An old node's row names no owner: it is taken, as an old node
 			// takes it, only while old nodes are in the cluster.
-			id, owned, other := ownedSession(legacyKey, owner, true)
+			id, owned, other := ownedSession(legacyKey, owner, clientID.Contract(), true)
 			if !found && owned {
 				sessID, found = id, true
 			}
@@ -199,7 +211,7 @@ func (c *_Conn) handler(inMsg lp.MessagePack) error {
 			}
 			c.sessID = uid.LID(sessID)
 		}
-		rawSess := sessionRow(uint32(c.sessID), owner)
+		rawSess := sessionRow(uint32(c.sessID), owner, clientID.Contract())
 		if !foreign {
 			store.Session.Put(sessKey, rawSess)
 		}
@@ -421,32 +433,41 @@ func sessionOwner(clientID uid.ID) uint64 {
 	return sessionKey(clientID, 0)
 }
 
-// sessionRowLen is the length of a session row: the session id, and its
-// owner. Rows of versions up to v0.5.0 hold only the session id.
-const sessionRowLen = 12
+// sessionRowLen is the length of a session row: the session id, its owner,
+// and, since retirement was introduced, its contract. Rows of versions up to
+// v0.7.0 hold only the first 12 bytes.
+const sessionRowLen = 16
 
-// sessionRow returns the session row of session sessID owned by owner.
-func sessionRow(sessID uint32, owner uint64) []byte {
+// sessionRow returns the session row of session sessID owned by owner, of
+// contract. The contract lets a retired contract's session rows and logs be
+// found and removed; older rows, without it, are still read.
+func sessionRow(sessID uint32, owner uint64, contract uint32) []byte {
 	row := make([]byte, sessionRowLen)
 	binary.LittleEndian.PutUint32(row[0:4], sessID)
 	binary.LittleEndian.PutUint64(row[4:12], owner)
+	binary.LittleEndian.PutUint32(row[12:16], contract)
 	return row
 }
 
 // ownedSession reads the session row under key. owned reports a row of
 // owner, or, if unowned is set, a row that names no owner, as versions up to
-// v0.5.0 wrote; foreign reports a row of another owner, which is left alone.
-func ownedSession(key, owner uint64, unowned bool) (sessID uint32, owned, foreign bool) {
+// v0.7.0 wrote; foreign reports a row of another owner or contract, which is
+// left alone.
+func ownedSession(key, owner uint64, contract uint32, unowned bool) (sessID uint32, owned, foreign bool) {
 	row, err := store.Session.Get(key)
 	if err != nil || len(row) < 4 {
 		return 0, false, false
 	}
-	if len(row) < sessionRowLen {
+	if len(row) < 12 {
 		if !unowned {
 			return 0, false, true
 		}
 	} else if binary.LittleEndian.Uint64(row[4:12]) != owner {
 		log.ErrLogger.Warn().Str("context", "conn.ownedSession").Msg("refused to resume a session of another owner")
+		return 0, false, true
+	}
+	if len(row) >= sessionRowLen && binary.LittleEndian.Uint32(row[12:16]) != contract {
+		log.ErrLogger.Warn().Str("context", "conn.ownedSession").Msg("refused to resume a session of another contract")
 		return 0, false, true
 	}
 	return binary.LittleEndian.Uint32(row[:4]), true, false
@@ -497,6 +518,19 @@ func (c *_Conn) onConnect(clientID []byte) (uid.ID, *types.Error) {
 		c.insecure.Store(true)
 		c.serviceTrusted.Store(true)
 	}
+	// A retired contract never serves again. Its primary id is still
+	// accepted, for a connection that can only open and read the
+	// contract's retirement (unitdb/retire): the platform keeps the
+	// authority that confirmed it. Every other id is refused, as an
+	// expired one, without a new id.
+	if c.service.revocations.isRetired(clientid.Contract()) {
+		if clientid.IsPrimary() {
+			c.retiredAdmin.Store(true)
+			c.idClaims = claims
+			return clientid, nil
+		}
+		return nil, types.ErrContractRetired
+	}
 	c.idClaims = claims
 
 	return clientid, nil
@@ -508,6 +542,12 @@ func (c *_Conn) onRelay(relayMsg utp.Relay, req *utp.RelayRequest) *types.Error 
 	defer func() {
 		log.ErrLogger.Debug().Str("context", "conn.onSubscribe").Int64("duration", time.Since(start).Nanoseconds()).Msg("")
 	}()
+
+	// A retired contract reads no history, from its own node or the one
+	// holding the topic.
+	if c.service.revocations.isRetired(c.clientID.Contract()) {
+		return types.ErrContractRetired
+	}
 
 	//Parse the key
 	topic := security.ParseKey(req.Topic)
@@ -558,6 +598,13 @@ func (c *_Conn) onSubscribe(subMsg utp.Subscribe, sub *utp.Subscription) *types.
 	defer func() {
 		log.ErrLogger.Debug().Str("context", "conn.onSubscribe").Int64("duration", time.Since(start).Nanoseconds()).Msg("")
 	}()
+
+	// A retired contract subscribes nowhere; this also refuses a
+	// subscription a rebalance moved here, or another node forwarded after
+	// the contract was retired.
+	if c.service.revocations.isRetired(c.clientID.Contract()) {
+		return types.ErrContractRetired
+	}
 
 	//Parse the key
 	topic := security.ParseKey(sub.Topic)
@@ -618,6 +665,13 @@ func (c *_Conn) onPublish(pub utp.Publish) *types.Error {
 	defer func() {
 		log.ErrLogger.Debug().Str("context", "conn.onPublish").Int64("duration", time.Since(start).Nanoseconds()).Msg("")
 	}()
+
+	// A retired contract neither publishes nor forwards: checked on the
+	// client's node and on the topic's owner, where the request is handled
+	// for the same client id.
+	if c.service.revocations.isRetired(c.clientID.Contract()) {
+		return types.ErrContractRetired
+	}
 
 	for _, pubMsg := range pub.Messages {
 		//Parse the key
@@ -768,8 +822,42 @@ func (c *_Conn) onSpecialRequest(topic *security.Topic, payload []byte) (ok bool
 	case requestRevoke:
 		resp, ok = c.onRevoke(payload)
 		return
+	case requestRetire:
+		resp, ok = c.onRetire(payload)
+		return
 	default:
 		return
+	}
+}
+
+// handleRetiredAdmin serves the one connection a retired contract keeps: its
+// primary id's, which can only open and read the retirement. A ping and a
+// disconnect are served as usual; a publish is taken only as a
+// unitdb/retire request. Anything else is refused while the connection stays
+// open.
+func (c *_Conn) handleRetiredAdmin(inMsg lp.MessagePack) error {
+	switch inMsg.Type() {
+	case utp.PINGREQ:
+		c.queue(&utp.ControlMessage{MessageType: utp.PINGREQ, FlowControl: utp.ACKNOWLEDGE})
+		return nil
+	case utp.DISCONNECT:
+		go c.clientDisconnect(errors.New("client initiated disconnect"))
+		return nil
+	case utp.PUBLISH:
+		m := *inMsg.(*utp.Publish)
+		if len(m.Messages) == 1 {
+			topic := security.ParseKey(m.Messages[0].Topic)
+			if len(topic.Key) == 6 && string(topic.Key) == "unitdb" && topic.Target() == requestRetire {
+				c.onSpecialRequest(topic, m.Messages[0].Payload)
+				c.queue(&utp.ControlMessage{MessageType: utp.PUBLISH, FlowControl: utp.ACKNOWLEDGE, MessageID: m.MessageID})
+				return nil
+			}
+		}
+		c.notifyError(types.ErrContractRetired, m.MessageID)
+		return nil
+	default:
+		c.notifyError(types.ErrContractRetired, 0)
+		return nil
 	}
 }
 
@@ -777,6 +865,11 @@ func (c *_Conn) onSpecialRequest(topic *security.Topic, payload []byte) (ok bool
 func (c *_Conn) onClientIDRequest() (interface{}, bool) {
 	if !c.clientID.IsPrimary() {
 		return types.ErrClientIdForbidden, false
+	}
+	if c.service.revocations.isRetired(c.clientID.Contract()) {
+		// No new credentials of a retired contract, not even on its
+		// primary's connection.
+		return types.ErrContractRetired, false
 	}
 
 	clientid, err := uid.NewSecondaryClientID(c.clientID)
@@ -807,6 +900,10 @@ func (c *_Conn) onKeyGen(payload []byte) (interface{}, bool) {
 	// insecure mode.
 	if !c.clientID.IsPrimary() && !c.serviceTrusted.Load() {
 		return types.ErrKeyGenForbidden, false
+	}
+	if c.service.revocations.isRetired(c.clientID.Contract()) {
+		// A retired contract issues no key.
+		return types.ErrContractRetired, false
 	}
 
 	// Deserialize the payload.

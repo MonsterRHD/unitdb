@@ -288,6 +288,7 @@ func TestSessionBoundToOwner(t *testing.T) {
 
 func TestOwnedSession(t *testing.T) {
 	const key, owner, other = uint64(1<<63 | 0x51), uint64(0xaaaa), uint64(0xbbbb)
+	const contract, otherContract = uint32(0x11223344), uint32(0x55667788)
 	put := func(row []byte) {
 		t.Helper()
 		if err := store.Session.Put(key, row); err != nil {
@@ -296,16 +297,18 @@ func TestOwnedSession(t *testing.T) {
 	}
 	check := func(desc string, unowned bool, wantID uint32, wantOwned, wantForeign bool) {
 		t.Helper()
-		id, owned, foreign := ownedSession(key, owner, unowned)
+		id, owned, foreign := ownedSession(key, owner, contract, unowned)
 		if id != wantID || owned != wantOwned || foreign != wantForeign {
 			t.Errorf("%s: session %d, owned %t, foreign %t; want %d, %t, %t", desc, id, owned, foreign, wantID, wantOwned, wantForeign)
 		}
 	}
 	check("no row", true, 0, false, false)
-	put(sessionRow(7, owner))
+	put(sessionRow(7, owner, contract))
 	check("the owner's row", false, 7, true, false)
-	put(sessionRow(8, other))
+	put(sessionRow(8, other, contract))
 	check("another owner's row", true, 0, false, true)
+	put(sessionRow(9, owner, otherContract))
+	check("another contract's row", true, 0, false, true)
 	put([]byte{9, 0, 0, 0})
 	check("an old row, taken", true, 9, true, false)
 	check("an old row, not taken", false, 0, false, true)

@@ -1,7 +1,9 @@
 package store
 
 import (
+	"bytes"
 	"encoding/binary"
+	"encoding/gob"
 	"strconv"
 	"time"
 )
@@ -156,4 +158,51 @@ func PutLegacyMessageForTest(contract uint32, topic string, payload []byte) erro
 		return err
 	}
 	return PutLegacyIndexForTest(contract, topic)
+}
+
+// retireHintForTest mirrors the cluster's replicaHint, for a retirement
+// test that stores a hint the purge scans.
+type retireHintForTest struct {
+	ID    []byte
+	Entry retireHintPayloadForTest
+	Op    *LogOp
+}
+
+type retireHintPayloadForTest = hintEntryPayload
+
+// PutRetireHintForTest stores a hint of a message of entryContract, as the
+// cluster keeps one (gob matches its replicaHint by field names).
+func PutRetireHintForTest(node string, id []byte, messageID string, entryContract uint32, topic string) error {
+	var h retireHintForTest
+	h.ID = id
+	h.Entry.ID = messageID
+	h.Entry.Contract = entryContract
+	h.Entry.Topic = topic
+	h.Entry.Payload = []byte(messageID)
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(h); err != nil {
+		return err
+	}
+	return adp.PutWithID(sysContract, id, hintTopic(node), buf.Bytes(), "")
+}
+
+// RetireForTest purges a contract as a retirement does, and returns what is
+// left, with the nodes hints may be kept for.
+func RetireForTest(contract uint32, nodes []string) (RetireLeftovers, error) {
+	return RetireContract(contract, nil)
+}
+
+// ScanRetireForTest reports what the store still holds of a contract.
+func ScanRetireForTest(contract uint32, nodes []string) RetireLeftovers {
+	return ScanRetire(contract, nodes, nil)
+}
+
+// SessionRowForTest renders a session row naming block, owner and contract,
+// as the server writes them.
+func SessionRowForTest(block uint32, owner uint64, contract uint32) []byte {
+	row := make([]byte, 16)
+	binary.LittleEndian.PutUint32(row[0:4], block)
+	binary.LittleEndian.PutUint64(row[4:12], owner)
+	binary.LittleEndian.PutUint32(row[12:16], contract)
+	return row
 }

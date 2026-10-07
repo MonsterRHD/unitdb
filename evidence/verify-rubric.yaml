@@ -1,0 +1,25 @@
+rubrics:
+  - id: 1
+    type: f2p
+    text: 只有合同主身份能够创建退役请求，同一合同重复请求复用唯一持久代际。
+  - id: 2
+    type: f2p
+    text: 退役标记确认后所有节点拒绝该合同的新连接、凭据签发、发布和订阅，其他合同不受影响。
+  - id: 3
+    type: f2p
+    text: 活动连接被终结，local/remote owner 上的订阅均被排空，路由变化不会留下可投递订阅。
+  - id: 4
+    type: f2p
+    text: 普通消息、可靠副本、topic index 与 replica hints 按合同删除且不会误删系统或其他合同命名空间。
+  - id: 5
+    type: f2p
+    text: seen IDs、会话日志、连接记录和安全撤销状态在完成前均纳入遗留扫描。
+  - id: 6
+    type: f2p
+    text: 节点不可达或删除失败时合同持续封禁并报告阻塞资源，恢复后只重试未确认工作。
+  - id: 7
+    type: p2p
+    text: 进程重启、leader 切换和离线节点回归会继续同一退役代际，旧状态不能复活合同。
+  - id: 8
+    type: p2p
+    text: TTL 清理、普通断连、集群再平衡及未退役合同的发布订阅行为保持通过。

@@ -183,6 +183,16 @@ func (a *adapter) Delete(contract uint32, messageId []byte, topic string) error 
 	return a.db.DeleteEntry(entry.WithID(messageId))
 }
 
+// DeleteMatching deletes every entry matching topic, a wildcard included.
+func (a *adapter) DeleteMatching(contract uint32, topic string) (int, error) {
+	return a.db.DeleteMatching(unitdb.NewQuery([]byte(topic)).WithContract(contract))
+}
+
+// CountMatching counts the entries matching topic, a wildcard included.
+func (a *adapter) CountMatching(contract uint32, topic string) (int, error) {
+	return a.db.CountMatching(unitdb.NewQuery([]byte(topic)).WithContract(contract))
+}
+
 // PutMessage appends the messages to the store.
 //
 // memdb keeps a version of a key for each time block the key was put in, and

@@ -71,6 +71,7 @@ type _Service struct {
 	listener  *listener.Listener // the main listener, closed by Close
 	conns     sync.WaitGroup     // accepted connections not yet closed
 	inflight  sync.WaitGroup     // publish fan-outs in progress
+	retireWG  sync.WaitGroup     // the retirement driver, which uses the store
 	closeOnce sync.Once
 }
 
@@ -157,6 +158,14 @@ func NewService(cfg *config.Config) (s *_Service, err error) {
 	if err := moveLegacyHints(); err != nil {
 		return nil, err
 	}
+	// The cluster, if any, is initialized before the service. A retirement
+	// purges the hints kept for each configured node.
+	if Globals.Cluster != nil {
+		store.SetHintNodes(func() []string { return append([]string(nil), Globals.Cluster.allNodes...) })
+	}
+	// Resume any retirement the node knew: enforce from the loaded state,
+	// and drive its phases again.
+	s.startRetirements()
 
 	go func() {
 		ticker := time.NewTicker(1 * time.Minute)
@@ -302,6 +311,9 @@ func (s *_Service) close() {
 	if s.cancel != nil {
 		s.cancel()
 	}
+	// The retirement driver uses the store; let its current tick finish
+	// before the store closes.
+	s.retireWG.Wait()
 
 	s.meter.UnregisterAll()
 	s.stats.Unregister()

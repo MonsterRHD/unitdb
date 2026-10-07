@@ -53,6 +53,10 @@ type _Conn struct {
 	// serviceTrusted is set only by service trust (a service client id, or
 	// unitdb/service), never by the insecure flag.
 	serviceTrusted     atomic.Bool
+	// retiredAdmin is set for the primary id of a retired contract: its
+	// connection serves nothing but unitdb/retire, to open the retirement
+	// and read its status. It gets no session and no renewed credential.
+	retiredAdmin       atomic.Bool
 	username           string         // The username provided by the client during connect.
 	message.MessageIds                // local identifier of messages
 	clientID           uid.ID         // The clientid provided by client during connect or new Id assigned.
@@ -355,6 +359,11 @@ func (c *_Conn) rehome(resend map[string]bool, last bool) bool {
 // with the topic's owner, or errPartialWildcard if a wildcard subscription
 // could not be sent to every node. The caller holds the connection's lock.
 func (c *_Conn) reconcile(r *subRoute, resend map[string]bool) error {
+	// A retired contract's subscription is placed nowhere: a rehash while
+	// its drain runs must not move one to a node that already purged it.
+	if c.service.revocations.isRetired(c.clientID.Contract()) {
+		return types.ErrContractRetired
+	}
 	local, nodes := Globals.Cluster.holders(c.clientID.Contract(), r.name)
 	if local && r.localID == nil {
 		id, err := c.putSubscription(r.name, r.sub)

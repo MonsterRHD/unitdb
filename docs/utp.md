@@ -194,6 +194,24 @@ A primary Client, a trusted service's included, revokes Client IDs and Security 
 
 The Server answers `{"status": 200}`; 403 to a Client that is not primary, a Client a service vouched for included; 400 to a request with nothing to revoke, a uuid of 0 or not decimal, or an until gone by. A revoked Client ID is refused at CONNECT with Return Code 0x02, without a new ClientID, and on `unitdb/service` with status 403; a revoked Security Key is refused with status 401. What is already open is not closed: connections and subscriptions stay until the Client reconnects or subscribes again. Every node of a cluster refuses what was revoked, but a node of an earlier version, which answers `unitdb/revoke` with status 404, refuses none of it.
 
+### Retirement
+A primary Client permanently retires its contract, for an expired contract or a cancelled one, by publishing to `unitdb/retire`:
+
+| Request | Effect |
+| --- | --- |
+| `{"confirm": true}` | opens the contract's one retirement, persistently; a repeated request opens no second one |
+| `{}` | reads the retirement status only |
+
+The retirement is identified by a generation derived from the contract, so two requests, even to two nodes, can never open two. The primary Client that confirms the request is the only authority that can open it. Every node then drives three phases, confirming each into the cluster state before it advances, and advancing only once every node it can reach confirmed the phase before:
+
+1. **barred** — the contract gets no new CONNECT, Client ID or topic key, and cannot publish, subscribe or relay; this is enforced at every node, including a node that was down when the retirement opened, from its own persisted state when it is back;
+2. **drained** — the contract's connections still open, local and proxied, are closed and its subscriptions removed;
+3. **purged** — the contract's messages, reliable replicas, topic index entries, replica hints, replicated-message dedup ids, session rows and logs and its revocation records are deleted, and the node confirms its legacy scan is empty.
+
+The retirement completes only once every reachable state owner confirmed the purge with an empty scan. It never finishes while a reachable node cannot retire yet (an older node, which holds the contract's data), and a node that was not reachable does its unconfirmed phases when it returns. A failed step or a process restart resumes at the persisted phase: every deletion is idempotent, so repeating it makes nothing twice. The retirement itself is never removed, so an owner change, a new leader or a rebalance can never make the contract serve again. TTL expiry, ordinary disconnects and other contracts are unaffected.
+
+While retired, only the contract's primary Client ID still connects, and its connection serves only `unitdb/retire`; every other request is refused with status 410, other Client IDs are refused at CONNECT with Return Code 0x07, and secondary Clients and key generation are refused with status 403. The answer is `{"status": 200, "contract": <id>, "generation": <id>, "state": "barred|draining|purging|done", "done": <bool>, "nodes": [{"node": "<name>", "reachable": <bool>, "state": "...", "phase": 0..3, "remaining": {"<resource>": <count>}}], "remaining": {...}}`: a node not reached, one that cannot retire, or resources a node still holds, name the blocker. An older node answers `unitdb/retire` with status 404, and a cluster containing one cannot complete a retirement until it is upgraded.
+
 ### Reserved Topics
 A Topic whose first part starts with '$' is reserved for the Server. A Client may not publish, subscribe, unsubscribe, relay or generate a Security Key for it, whatever its mode: the request is refused with status 403.
 

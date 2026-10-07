@@ -71,6 +71,14 @@ type Adapter interface {
 	// it returns an error if some error was encountered during delete.
 	Delete(contract uint32, messageId []byte, topic string) error
 
+	// DeleteMatching deletes every entry matching the topic, a wildcard one
+	// included, on contract, and returns how many it deleted. It is the
+	// delete side of a wildcard Get, used to retire a contract.
+	DeleteMatching(contract uint32, topic string) (int, error)
+
+	// CountMatching counts the entries a wildcard topic matches on contract.
+	CountMatching(contract uint32, topic string) (int, error)
+
 	// PutMessage is used to store a message.
 	// it returns an error if some error was encountered during storage.
 	PutMessage(key uint64, payload []byte) error

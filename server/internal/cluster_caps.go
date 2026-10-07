@@ -73,9 +73,14 @@ const (
 	// others (Revocations). An older node is sent none, and refuses no id
 	// or key for being revoked.
 	capRevocations = "revocations"
+	// capRetire: the node holds contracts' retirements (unitdb/retire),
+	// drives their bar, drain and purge phases, and answers RetireScan. An
+	// older node is sent none and blocks a retirement's completion: what it
+	// holds of the contract cannot be reliably cleared until it can retire.
+	capRetire = "retire"
 )
 
-var allCapabilities = []string{capReplicate, capDeliver, capSessions, capResync, capService, capV2Keys, capRevocations}
+var allCapabilities = []string{capReplicate, capDeliver, capSessions, capResync, capService, capV2Keys, capRevocations, capRetire}
 
 // ownCapabilities are what this node can do: all of them, unless the
 // UNITDB_CLUSTER_CAPS environment variable lists fewer ("none" for none), so
