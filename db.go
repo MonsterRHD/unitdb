@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -42,6 +43,13 @@ import (
 type DB struct {
 	opts *_Options
 
+	// path is the absolute database directory.
+	path string
+
+	// backupMu serializes backups against one another; a backup itself is
+	// coordinated through syncLockC and the memdb backup barrier.
+	backupMu sync.Mutex
+
 	lock _LockFile
 	fs   *_FileSet
 
@@ -59,6 +67,14 @@ func Open(path string, opts ...Options) (*DB, error) {
 			opt.set(options)
 		}
 	}
+
+	// Keep an absolute path so backup file sets and WAL logs can report
+	// names relative to the database directory.
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	path = abs
 
 	lock, err := createLockFile(path)
 	if err != nil {
@@ -171,6 +187,8 @@ func Open(path string, opts ...Options) (*DB, error) {
 
 	db := &DB{
 		opts: options,
+
+		path: path,
 
 		lock: lock,
 		fs:   fileset,

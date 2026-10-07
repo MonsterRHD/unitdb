@@ -82,3 +82,9 @@ func newLockFile(name string) (_LockFile, error) {
 	}
 	return &_WindowsFileLock{fd, name}, nil
 }
+
+// fsyncDir is a no-op on Windows: file renames are flushed by the file
+// handles involved, and directories cannot be opened for fsync there.
+func fsyncDir(dir string) error {
+	return nil
+}

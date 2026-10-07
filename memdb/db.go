@@ -32,6 +32,12 @@ import (
 type DB struct {
 	mu sync.RWMutex
 
+	// backupMu excludes online backups from log release. A backup takes the
+	// write lock after flushing: the WAL logs it listed then stay on disk
+	// until the backup has copied them; releaseLog only takes a read lock.
+	// Puts never take it, so writes continue during a backup.
+	backupMu sync.RWMutex
+
 	version int
 	opts    *_Options
 

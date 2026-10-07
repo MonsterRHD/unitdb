@@ -57,3 +57,17 @@ func newLockFile(name string) (_LockFile, error) {
 	}
 	return &_UnixFileLock{f, name}, nil
 }
+
+// fsyncDir flushes a directory's entries, so a file created or renamed in
+// it is durable after a crash. A missing directory is nothing to sync.
+func fsyncDir(dir string) error {
+	f, err := os.Open(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	defer f.Close()
+	return f.Sync()
+}

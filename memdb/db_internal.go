@@ -298,11 +298,16 @@ func (db *DB) releaseLog(timeID _TimeID) error {
 	block.RLock()
 	timeRefs := block.timeRefs
 	block.RUnlock()
+	// An online backup that listed these logs is copying them; wait for it
+	// so SignalLogApplied cannot remove a listed log mid-copy.
+	db.backupMu.RLock()
 	for _, timeRef := range timeRefs {
 		if err := db.internal.wal.SignalLogApplied(int64(timeRef)); err != nil {
+			db.backupMu.RUnlock()
 			return err
 		}
 	}
+	db.backupMu.RUnlock()
 
 	// Free under the block's write lock so it waits for readers of the buffer.
 	block.Lock()

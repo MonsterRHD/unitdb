@@ -1,0 +1,25 @@
+rubrics:
+  - id: 1
+    type: f2p
+    text: 在线备份固定一个明确确认点，确认点之后的新写入不会混入同一候选。
+  - id: 2
+    type: f2p
+    text: 备份包含确认 WAL、未同步内存记录以及 info、window、index、data、lease、filter 和 checksum 的一致集合。
+  - id: 3
+    type: f2p
+    text: 候选发布前验证格式版本、文件清单、长度和校验和，并在目录与文件完成磁盘同步后才替换当前备份。
+  - id: 4
+    type: f2p
+    text: 复制、空间、校验或同步失败不破坏上一有效备份，也不让 Open 看到半写目录。
+  - id: 5
+    type: f2p
+    text: 进程在准备、发布或清理阶段退出后，下一次操作会确定地完成候选或清理它。
+  - id: 6
+    type: f2p
+    text: 恢复只创建新的目标目录，验证后通过现有恢复链重放 WAL，失败时源库保持不变。
+  - id: 7
+    type: p2p
+    text: 恢复结果保持 TTL、删除状态、合同隔离、消息顺序和已确认写入，不复活已删除记录。
+  - id: 8
+    type: p2p
+    text: 只读打开、旧文件格式、普通 Flush/Close 和未使用备份入口的崩溃恢复继续通过。
